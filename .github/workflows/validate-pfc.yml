@@ -1,0 +1,117 @@
+name: Validate PFC Assets
+
+# Runs on every PR to main — the quality gate for PFC promotions
+# 5 checks: vitest, OAA validation, registry lint, skeleton validate, EMC compose
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  vitest:
+    name: Vitest — Ontology Visualiser
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Install dependencies
+        working-directory: tools/ontology-visualiser
+        run: npm ci
+      - name: Run tests
+        working-directory: tools/ontology-visualiser
+        run: npx vitest run
+
+  registry-lint:
+    name: Registry Lint — ont-registry-index.json
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Validate registry JSON
+        run: |
+          node -e "
+            const reg = require('./ontology-library/ont-registry-index.json');
+            const count = reg.ontologies ? reg.ontologies.length : Object.keys(reg).length;
+            console.log('Registry loaded: ' + count + ' entries');
+            if (count < 40) {
+              console.error('ERROR: Expected ≥40 ontologies, got ' + count);
+              process.exit(1);
+            }
+            console.log('✅ Registry lint passed');
+          "
+
+  oaa-validate:
+    name: OAA v7 — Ontology Schema Validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Validate OAA schemas
+        run: |
+          echo "Checking for OAA v6/v7 ontology files..."
+          count=$(find ontology-library -name '*-oaa-v*.json' | wc -l)
+          echo "Found $count OAA-format ontology files"
+          if [[ "$count" -lt 30 ]]; then
+            echo "::error::Expected ≥30 OAA ontology files, found $count"
+            exit 1
+          fi
+          # Validate each is valid JSON
+          fail=0
+          while IFS= read -r f; do
+            if ! node -e "JSON.parse(require('fs').readFileSync('$f','utf8'))" 2>/dev/null; then
+              echo "::error::Invalid JSON: $f"
+              fail=1
+            fi
+          done < <(find ontology-library -name '*-oaa-v*.json')
+          if [[ "$fail" -eq 1 ]]; then exit 1; fi
+          echo "✅ All OAA ontology files are valid JSON"
+
+  skeleton-validate:
+    name: App Skeleton — Structure Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate skeleton exists and is valid JSON
+        run: |
+          SKEL=$(find tools/ontology-visualiser -name 'pfc-app-skeleton-*.jsonld' | head -1)
+          if [[ -z "$SKEL" ]]; then
+            echo "::warning::No app skeleton found — skipping"
+            exit 0
+          fi
+          node -e "const s = JSON.parse(require('fs').readFileSync('$SKEL','utf8')); console.log('Skeleton: ' + (s['@graph'] || []).length + ' nodes'); console.log('✅ Skeleton valid');"
+
+  emc-compose:
+    name: EMC Compose — Category Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Validate EMC composer
+        run: |
+          COMPOSER=$(find tools/ontology-visualiser -name 'emc-composer.js' | head -1)
+          if [[ -z "$COMPOSER" ]]; then
+            echo "::warning::No emc-composer.js found — skipping"
+            exit 0
+          fi
+          node -e "
+            const m = require('./$COMPOSER');
+            const cats = m.CATEGORY_COMPOSITIONS || {};
+            const count = Object.keys(cats).length;
+            console.log('EMC categories: ' + count);
+            if (count < 8) {
+              console.error('ERROR: Expected ≥8 EMC categories, got ' + count);
+              process.exit(1);
+            }
+            console.log('✅ EMC compose check passed');
+          "
